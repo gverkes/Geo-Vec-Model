@@ -33,7 +33,6 @@ class GraphVec():
         self._loss_vals, self._acc_vals = [], []
 
         # placeholders
-        # s = [self.vocab_size, self.vocab_size]
         self.placeholders = {
             'A': tf.sparse_placeholder(tf.float32),
             'L': tf.sparse_placeholder(tf.float32),
@@ -41,11 +40,9 @@ class GraphVec():
             'val': tf.placeholder(tf.float32),
             'train_dataset': tf.placeholder(tf.int32),
             'train_labels': tf.placeholder(tf.int32),
-            # 'dropout': tf.placeholder_with_default(0., shape=())
         }
 
         # model
-        # self.aux_losses = None
         dummy = sp2tf(ss.eye(self.vocab_size))
         self.init_model(x=dummy)
         self.samples = None
@@ -58,14 +55,18 @@ class GraphVec():
         self.init_optimizer()
 
         # sess
-        self.trained = 0
-        # self.sess = tf.Session(graph=self.graph)
-        self.sess = tf.Session()
+        self.total_iterations = 0
+
+        # Force CPU/GPU
+        config = tf.ConfigProto(
+            device_count={'GPU': 0}  # uncomment this line to force CPU
+        )
+
+        self.sess = tf.Session(config=config)
         self.sess.run(tf.global_variables_initializer())
 
-    def init_model(self, x, aux_tasks=None):
-        """geo-vec model with variable number of gcn layers. Optional aux_taks
-        param is now unimplemented to specify which tasks to add. All aux losses
+    def init_model(self, x):
+        """geo-vec model with variable number of gcn layers. All aux losses
         should be gathered in a self.aux_losses variable to gather later on."""
         self.h = [self.gcn(x, self.vocab_size, self.h_layers[0], self.act, layer=0, sparse=True)]
 
@@ -146,9 +147,12 @@ class GraphVec():
 
         self.loss = self.graph_loss + self.aux_loss
 
-        # optimizer
+        # graph optimizer
         optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
-        self.opt_op = optimizer.minimize(self.loss)
+        self.graph_opt_op = optimizer.minimize(self.graph_loss)
+
+        optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
+        self.aux_opt_op = optimizer.minimize(self.aux_loss, var_list=[self.doc_embeddings])
 
         correct_recons = tf.greater_equal(tf.multiply(tf.cast(self.recon, tf.int32),
                                                       tf.cast(self.placeholders['val'], tf.int32)),
@@ -218,29 +222,40 @@ class GraphVec():
                                                           2 * doc[0].strides))
         np.random.shuffle(windows)
 
-        train_dataset = windows[:512, :-1]
-        train_labels = windows[:512, -1:]
+        train_dataset = windows[:256, :-1]
+        train_labels = windows[:256, -1:]
 
         return (sp2tf(A), sp2tf(L)), idx, val, train_dataset, train_labels
 
-    def train(self, save_dir, num_epochs=100, print_freq=50, backup_freq=None, friendly_print=False, save_name='model'):
+    def train(self, save_dir, num_epochs=100, print_freq=50, backup_freq=None, friendly_print=False, save_name=None):
         """train op that can be invoked multiple times."""
         tf.set_random_seed(43)
         np.random.seed(43)
 
+        # Check if saving directory exists
         if (not os.path.isdir(save_dir)):
             raise ValueError("The directory {} does not exists".format(save_dir))
 
+        # Specify model save name by its hyper parameters
+        if (save_name is None):
+            save_name = 'l_{};lr_{:.1E};ps_size_{:4d};emb_w_{:4d};emb_d_{:4d}'.format(
+                                                                          '>'.join(map(str, h_layers)),
+                                                                          self.learning_rate,
+                                                                          self.pos_sample_size,
+                                                                          self.embedding_size_w,
+                                                                          self.embedding_size_d
+                                                                          )
+
         for e in range(num_epochs):
-            self.trained += 1
+            self.total_iterations += 1
             (A, L), idx, val, train_dataset, train_labels = self.get_sample()
 
             feed_dict = self.get_feed_dict(A, L, idx, val, train_dataset, train_labels)
 
-            outs = self.sess.run([self.opt_op, self.loss, self.graph_loss,
-                                  self.aux_loss, self.accuracy],
+            outs = self.sess.run([self.graph_opt_op, self.aux_opt_op, self.loss,
+                                  self.graph_loss, self.aux_loss, self.accuracy],
                                  feed_dict=feed_dict)
-            avg_loss, graph_loss, aux_loss, avg_acc = outs[1], outs[2], outs[3], outs[4]
+            avg_loss, graph_loss, aux_loss, avg_acc = outs[2], outs[3], outs[4], outs[5]
             self._loss_vals.append(avg_loss)
             self._acc_vals.append(avg_acc)
 
@@ -256,16 +271,16 @@ class GraphVec():
 
             if backup_freq:
                 if (e + 1) % backup_freq == 0:
-                    self.save('{1}/{2}_{3}.ckpt'.format(save_dir, save_name, e + 1))
+                    self.save('{0}/{1}_{2}.ckpt'.format(save_dir, save_name, e + 1))
 
         else:
-            print('**** Done training: {} iterations ****'.format(self.trained))
-            self.save('{1}/{2}_final.ckpt'.format(save_dir, save_name))
+            print('**** Done training: {} iterations ****'.format(self.total_iterations))
+            self.save('{0}/{1}_final.ckpt'.format(save_dir, save_name))
 
     def forward(self, doc_id):
-        A_o, A_i, L_o, L_i = self.get_doc(doc_id)
+        A, L = self.get_doc(doc_id)
 
-        feed_dict = self.get_feed_dict(A_o, A_i, L_o, L_i, 0, 0, 0, 0, 0, 0)
+        feed_dict = self.get_feed_dict(A, L, 0, 0, 0, 0, 0, 0)
         outs = self.sess.run([self.embed_d], feed_dict=feed_dict)
 
         return outs[0]
