@@ -2,6 +2,39 @@ import numpy as np
 import scipy.sparse as ss
 import tensorflow as tf
 
+import scipy.sparse as ss
+# from scipy.linalg import svd
+# from scipy.sparse.linalg import svds
+
+def get_adj_pmi(tokenized_docs, vocab_size):
+    for tokenized_doc in tokenized:
+        adj = np.vstack((tokenized_doc[:-1], tokenized_doc[1:]))
+
+        # uni probs
+        uni_index, uni_count = np.unique(tokenized_doc, return_counts=True)
+        uni_prob = dict(zip(*(uni_index, uni_count / sum(uni_count))))
+
+        # symmetric bi(gram) probs
+        bi_index, bi_count = np.unique(np.sort(adj.T), return_counts=True, axis=0)
+        bi_prob = zip(*(bi_index, bi_count / sum(bi_count)))
+
+        # Pointwise mutual information
+        pmi = np.zeros((bi_count.shape))
+        for i, ((x, y), pxy) in enumerate(bi_prob):
+            pxpy = uni_prob[x] * uni_prob[y]
+            pmi[i] = np.log(pxy / pxpy)
+
+        # DEBUG: print top 10 co-occurences
+        # for i, j in bi_index[np.argsort(pmi)[-10:]]:
+        #     print(id2word[i], id2word[j])
+
+        # Sparse pmi graph
+        doc_gr = ss.coo_matrix((pmi, (bi_index[:, 0],
+                                      bi_index[:, 1])),
+                               (vocab_size, vocab_size))
+
+        yield doc_gr
+
 def get_adj(tokenized_docs, vocab_size):
     for tokenized_doc in tokenized_docs:
         adj = np.vstack((tokenized_doc[:-1], tokenized_doc[1:]))
